@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Document</title>
+    </head>
+    <body>
+        <h1>Get Mic Stream</h1>
+        <button id="record">record</button>
+        <button id="stop">stop</button>
+        <script>
+            const record = document.querySelector('#record');
+            const stop = document.querySelector('#stop');
+
+            record.addEventListener('click', () => {
+                beginRecord();
+            });
+
+            stop.addEventListener('click', () => {
+                endRecord();
+            });
+
+            // 将单次采样的 Float32Array 合并到一个数组中, 输入和输出采样率不同需要进行压缩
+            function mergeArray(list) {
+                console.log(list);
+                const length = list.length * list[0].length;
+                console.log(length);
+                const data = new Float32Array(length);
+                let offset = 0;
+                for (let i = 0; i < list.length; i++) {
+                    // console.log(list[i]);
+                    data.set(list[i], offset);
+                    offset += list[i].length;
+                }
+
+                // 浏览器默认采样率 48000（存疑），根据目标采样率进行压缩（计算压缩率ratio，每隔 ratio 取一个采样）
+                const compressionRatio = parseInt(48000 / 8000 + '');
+                const compressionLength = data.length / compressionRatio;
+                const res = new Float32Array(compressionLength);
+                let index = 0;
+                let j = 0;
+                while (index < compressionLength) {
+                    res[index] = data[j];
+                    j += compressionRatio;
+                    index++;
+                }
+
+                return res;
+                // return data;
+            }
+
+            // 双声道时交叉存入采样，wav 播放双声道是每个声道轮流播放单个采样
+            function interleaveLeftAndRight(left, right) {
+                const totalLength = left.length + right.length;
+                const data = new Float32Array(totalLength);
+                for (let i = 0; i < left.length; i++) {
+                    const k = i * 2;
+                    data[k] = left[i];
+                    data[k + 1] = right[i];
+                }
+                return data;
+            }
+
+            // 字符串转 UTF16 写入 buffer
+            function writeUTFBytes(view, offset, string) {
+                const lng = string.length;
+                for (let i = 0; i < lng; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
+                }
+            }
+
+            // 生成 PCM 的二进制数据
+            function createPCMFile(audioData) {
+                const buffer = new ArrayBuffer(audioData.length * 2);
+                const view = new DataView(buffer);
+
+                const length = audioData.length;
+                let index = 0;
+                const volume = 1;
+                for (let i = 0; i < length; i++) {
+                    view.setInt16(index, audioData[i] * (0x7fff * volume), true);
+                    index += 2;
+                }
+                return buffer;
+            }
+
+            // 将后端传递的 PCM 字符串转为 buffer 并添加 wav header
+            function addWavHeader(str) {
+                const WAV_HEAD_SIZE = 44;
+                const buffer = new ArrayBuffer(str.length * 2 + WAV_HEAD_SIZE);
+                const view = new DataView(buffer);
+
+                // 为 PCM 添加 wav header 转为 wav
+                // RIFF chunk descriptor/identifier
+                writeUTFBytes(view, 0, 'RIFF');
+                // RIFF chunk length
+                view.setUint32(4, 44 + str.length * 2, true);
+                // RIFF type
+                writeUTFBytes(view, 8, 'WAVE');
+                // format chunk identifier
+                // FMT sub-chunk
+                writeUTFBytes(view, 12, 'fmt ');
+                // format chunk length
+                view.setUint32(16, 16, true);
+                // sample format (raw)
+                view.setUint16(20, 1, true);
+                // stereo (2 channels)
+                view.setUint16(22, 1, true);
+                // sample rate
+                view.setUint32(24, 8000, true);
+                // byte rate (sample rate * block align)
+                view.setUint32(28, 8000 * 2, true);
+                // block align (channel count * bytes per sample)
+                view.setUint16(32, 2, true);
+                // bits per sample
+                view.setUint16(34, 16, true);
+                // data sub-chunk
+                // data chunk identifier
+                writeUTFBytes(view, 36, 'data');
+                // data chunk length
+                view.setUint32(40, str.length * 2, true);
+
+                const length = str.length;
+                let index = 44;
+                for (let i = 0; i < length; i++) {
+                    view.setInt16(index, str.charCodeAt(i), true);
+                    index += 2;
+                }
+                return buffer;
+            }
+
+            // 生成 PCM 文件并下载
+            function downloadPCM(arrayBuffer) {
+                const blob = new Blob([new Uint8Array(arrayBuffer)]);
+                const blobUrl = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = blobUrl;
+                link.download = 'test.pcm';
+                link.click();
+            }
+
+            // 生成 wav 并用 audio 播放
+            function genWavAndPlay(buffer) {
+                const blob = new Blob([new Uint8Array(buffer)]);
+                const blobUrl = URL.createObjectURL(blob);
+                const audio = document.createElement('audio');
+                audio.src = blobUrl;
+                audio.play();
+            }
+
+            let leftChannelDataList = [];
+            // let rightChannelDataList = [];
+            function onAudioProcess(e) {
+                // console.log(e.inputBuffer);
+                const audioBuffer = e.inputBuffer;
+                const singleLeftChannelData = audioBuffer.getChannelData(0);
+                // const singleRightChannelData = audioBuffer.getChannelData(1);
+                // console.log(singleLeftChannelData);
+                // console.log(singleRightChannelData);
+                //
+                leftChannelDataList.push(singleLeftChannelData.slice(0));
+                // rightChannelDataList.push(singleRightChannelData.slice(0));
+            }
+
+            // 创建消费并保存录音采样的 AudioContext
+            function createJSNode(audioContext) {
+                const BUFFER_SIZE = 4096;
+                const INPUT_CHANNEL_COUNT = 1;
+                const OUTPUT_CHANNEL_COUNT = 1;
+                const creator = audioContext.createScriptProcessor.bind(audioContext);
+                return creator(BUFFER_SIZE, INPUT_CHANNEL_COUNT, OUTPUT_CHANNEL_COUNT);
+            }
+
+            // PCM 转为 string，用于 ws 传递
+            function arrayBufferToString(arrayBuffer) {
+                // console.log(arrayBuffer);
+                return String.fromCharCode.apply(null, new Uint16Array(arrayBuffer));
+                // return new Uint16Array(arrayBuffer);
+            }
+
+            let isInRecording = false;
+            let mediaStream;
+            let audioNode;
+            let jsNode;
+            function beginRecord() {
+                if (isInRecording || !navigator.mediaDevices) return;
+                isInRecording = true;
+                console.log('getUserMedia supported.');
+
+                const constraints = {
+                    audio: {
+                        sampleRate: 48000,
+                        volume: 0,
+                    },
+                };
+
+                // WebRTC 获取实时录音，回调函数中利用 AudioContext 消费录音采样并暂存
+                navigator.mediaDevices.getUserMedia(constraints).then(stream => {
+                    // console.log(mediaStream);
+                    mediaStream = stream;
+                    const audioContext = new AudioContext();
+                    audioNode = audioContext.createMediaStreamSource(mediaStream);
+                    // audioNode.connect(audioContext.destination); // 开启录音的实时播放，用于测试
+
+                    jsNode = createJSNode(audioContext);
+                    jsNode.connect(audioContext.destination);
+                    jsNode.addEventListener('audioprocess', e => {
+                        onAudioProcess(e); // 处理原始录音数据
+                    });
+                    audioNode.connect(jsNode); // 消费录音
+                });
+            }
+
+            function endRecord() {
+                mediaStream.getAudioTracks()[0].stop(); // 结束录音
+                audioNode.disconnect(); // 结束录音数据收集(实时播放Node)
+                jsNode.disconnect(); // 结束录音数据收集
+                const leftChannelData = mergeArray(leftChannelDataList);
+
+                // 处理双声道
+                // const rightChannelData = mergeArray(rightChannelDataList);
+                // const PCMData = interleaveLeftAndRight(leftChannelData, rightChannelData);
+                // console.log(PCMData);
+                // const PCMBuffer = createPCMFile(PCMData);
+                // downloadPCM(PCMBuffer);
+
+                const PCMBuffer = createPCMFile(leftChannelData); // 生成 PCM 的二进制数据
+                // downloadPCM(PCMBuffer);
+                // console.log(arrayBufferToString(PCMBuffer).toString());
+                const str = arrayBufferToString(PCMBuffer).toString();
+                const wavBuffer = addWavHeader(str);
+                genWavAndPlay(wavBuffer);
+                // downloadPCM(buf);
+                leftChannelDataList = [];
+                // rightChannelDataList = [];
+                isInRecording = false;
+            }
+        </script>
+    </body>
+</html>
